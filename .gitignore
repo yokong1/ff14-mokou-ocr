@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+launch.log
+.cache/
+_backup/
+config.json
+data/
+shot_*.png
+*.tmp
