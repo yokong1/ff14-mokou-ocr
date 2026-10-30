@@ -9,7 +9,7 @@ FF14「魔光键影」活动的屏幕文字识别与输入辅助工具。当前�
 | 项目 | 要求 |
 | --- | --- |
 | 操作系统 | Windows 10 / 11，64 位 |
-| Python | **推荐 Python 3.13（64 位）**；Python 3.12（64 位）也已通过检查 |
+| Python | **Python 3.x（64 位，包含 Tcl/Tk）** |
 | Python 安装选项 | 使用完整安装器，保留 **Tcl/Tk（tcl/tk and IDLE）**；建议勾选 Add Python to PATH |
 | 文字识别 | Windows 自带 OCR，需要系统具备简体中文 OCR 语言组件 |
 | 游戏显示 | **建议窗口化或无边框窗口化**，并保持游戏画面可见 |
@@ -21,7 +21,7 @@ FF14「魔光键影」活动的屏幕文字识别与输入辅助工具。当前�
 
 1. 从 [Releases](https://github.com/yokong1/ff14-mokou-ocr/releases) 下载版本压缩包，或在仓库选择 **Code → Download ZIP**。
 2. **完整解压整个文件夹**，保留 `app.py`、`core`、`bin`、`launcher.ps1`、词库和两个启动批处理文件。不要只下载单个 Python 文件，也不要直接在压缩包内运行。
-3. 安装完整的 Python 3.13（64 位，包含 Tcl/Tk）。已安装并能正常使用 Python 3.12 的用户可以继续使用。
+3. 安装完整的 Python 3.x（64 位，包含 Tcl/Tk）。
 4. 将游戏设为窗口化或无边框窗口化，进入需要识别的活动画面。
 5. 双击 **「管理员启动.bat」**。也保留普通权限入口「启动.bat」，供不需要提权的环境使用。
 6. 确认工具标题显示 **ff14 mokou ocr · 0.9.2**。
@@ -54,7 +54,7 @@ FF14「魔光键影」活动的屏幕文字识别与输入辅助工具。当前�
 
 **提示找不到 Python 或 Tkinter**
 
-请安装完整的 Python 3.12 / 3.13，并保留 Tcl/Tk 组件。启动器会从项目虚拟环境、Python 注册信息和 PATH 中寻找可用解释器。精简版或嵌入式 Python 可能不包含 Tkinter。
+请安装完整的 Python 3.x（64 位），并保留 Tcl/Tk 组件。启动器会从项目虚拟环境、Python 注册信息和 PATH 中寻找可用解释器。精简版或嵌入式 Python 可能不包含 Tkinter。
 
 **提示没有可用的中文 OCR**
 
