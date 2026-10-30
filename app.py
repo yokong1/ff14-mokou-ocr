@@ -17,6 +17,11 @@ from core.keys import Keyboard
 from core.lookup import Lexicon, norm_loose, norm_text
 from core.ocrclient import OcrClient
 
+APP_NAME = "ff14 mokou ocr"
+APP_VERSION = "0.9.2"
+SCAN_REGION_HELP = "框选怪物名字可能出现的完整范围，尽量不要框取多余区域。"
+INPUT_REGION_HELP = "只框选文本输入框内的文字区域，不要把左侧输入法的“中”框进去。"
+
 CONFIG_PATH = os.path.join(BASE, "config.json")
 LEX_PATH = os.path.join(BASE, "词条总表.tsv")
 LEARNED_PATH = os.path.join(BASE, "data", "learned.json")
@@ -76,7 +81,7 @@ DEFAULT_CFG = {
     "max_attempts": 4,
     "skip_seconds": 8.0,
     "min_len": 2,
-    "max_len": 12,
+    "max_len": 14,
     "priority": "lowest",
     "blacklist": ["打倒所有敌兵", "得分", "奖励加成", "发送已输入的文字", "清空所有已输入的文字",
                   "退出任务", "按", "输入法", "回车"],
@@ -90,7 +95,8 @@ def load_cfg():
     cfg = dict(DEFAULT_CFG)
     if os.path.exists(CONFIG_PATH):
         try:
-            cfg.update(json.load(open(CONFIG_PATH, encoding="utf-8")))
+            with open(CONFIG_PATH, encoding="utf-8") as stream:
+                cfg.update(json.load(stream))
         except Exception:
             pass
     v = cfg.get("config_version", 0)
@@ -118,11 +124,57 @@ def load_cfg():
             cfg["candidate_band"] = list(DEFAULT_CFG["candidate_band"])
         cfg["config_version"] = 6
         save_cfg(cfg)
+    cfg["candidate_mode"] = False
+    cfg["candidate_region"] = None
     return cfg
 
 
 def save_cfg(cfg):
-    json.dump(cfg, open(CONFIG_PATH, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    with open(CONFIG_PATH, "w", encoding="utf-8") as stream:
+        json.dump(cfg, stream, ensure_ascii=False, indent=1)
+
+
+class ToolTip:
+    """仅在鼠标停留时展示区域说明，不改变选区或输入行为。"""
+    def __init__(self, widget, text, delay=350):
+        self.widget, self.text, self.delay = widget, text, delay
+        self.after_id = None
+        self.tip = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+        widget.bind("<Destroy>", self._hide, add="+")
+
+    def _schedule(self, event=None):
+        self._hide()
+        self.after_id = self.widget.after(self.delay, self._show)
+
+    def _show(self):
+        self.after_id = None
+        if self.tip is not None or not self.widget.winfo_exists():
+            return
+        tip = tk.Toplevel(self.widget)
+        self.tip = tip
+        tip.wm_overrideredirect(True)
+        x, y = self.widget.winfo_pointerx()+12, self.widget.winfo_pointery()+20
+        tip.wm_geometry("%+d%+d" % (x, y))
+        tk.Label(tip, text=self.text, justify="left", wraplength=360,
+                 background="#fff8dc", foreground="#263238", relief="solid",
+                 borderwidth=1, padx=10, pady=7, font=("Microsoft YaHei", 10)).pack()
+
+    def _hide(self, event=None):
+        if self.after_id is not None:
+            try:
+                self.widget.after_cancel(self.after_id)
+            except tk.TclError:
+                pass
+            self.after_id = None
+        if self.tip is not None:
+            try:
+                self.tip.destroy()
+            except tk.TclError:
+                pass
+            self.tip = None
 
 
 class RegionSelector:
@@ -178,6 +230,8 @@ class App:
         self.root = root
         self.cfg = load_cfg()
         self.lex = Lexicon(LEX_PATH, LEARNED_PATH)
+        # 旧版固定上限 12 会挡住词库中的长 Boss 词，按实际词库长度放宽。
+        self.cfg["max_len"] = max(self.cfg.get("max_len", 12), max(map(len, self.lex.words)))
         self.ocr = None
         self.engine = None
         self.thread = None
@@ -186,7 +240,7 @@ class App:
         self.last_result = None
         self.hotkey_state = {}
         self._paused_shown = False
-        root.title("识别打怪助手  v7 · Unicode直输")
+        root.title("%s · %s" % (APP_NAME, APP_VERSION))
         root.geometry("980x740")
         # 注意: 不能置顶, 否则窗口会盖住游戏, 截屏截到的就是自己
         self._build_ui()
@@ -210,32 +264,26 @@ class App:
         opt = ttk.LabelFrame(self.root, text="2. 识别区域  ← 重要: 只框住怪名字出现的那一带, 别整屏识别")
         opt.pack(fill="x", padx=6, pady=4)
         self.region_var = tk.StringVar(value="自动(窗口客户区)")
-        ttk.Label(opt, textvariable=self.region_var, foreground="#0077cc").grid(
-            row=0, column=0, columnspan=2, sticky="w", **pad)
+        self.region_label = ttk.Label(opt, textvariable=self.region_var, foreground="#0077cc")
+        self.region_label.grid(row=0, column=0, columnspan=2, sticky="w", **pad)
+        self.region_tip = ToolTip(self.region_label, SCAN_REGION_HELP)
         ttk.Button(opt, text="🖱 拖拽框选区域", command=self.select_region).grid(row=0, column=2, **pad)
         ttk.Button(opt, text="恢复自动", command=self.reset_region).grid(row=0, column=3, **pad)
         self.prev_var = tk.BooleanVar(value=self.cfg["preview"])
         ttk.Button(opt, text="试识别一次(不按键)", command=self.test_once).grid(row=0, column=4, **pad)
-        self.cand_region_var = tk.StringVar(value="候选区: 自动")
-        ttk.Label(opt, textvariable=self.cand_region_var, foreground="#0077cc").grid(
-            row=1, column=0, columnspan=2, sticky="w", **pad)
-        ttk.Button(opt, text="🖱 框选候选区", command=self.select_cand_region).grid(row=1, column=2, **pad)
-        ttk.Button(opt, text="恢复自动", command=self.reset_cand_region).grid(row=1, column=3, **pad)
         self.input_region_var = tk.StringVar(value="输入框区: 未设置")
-        ttk.Label(opt, textvariable=self.input_region_var, foreground="#c06000").grid(
-            row=2, column=0, columnspan=2, sticky="w", **pad)
+        self.input_region_label = ttk.Label(opt, textvariable=self.input_region_var, foreground="#c06000")
+        self.input_region_label.grid(row=2, column=0, columnspan=2, sticky="w", **pad)
+        self.input_region_tip = ToolTip(self.input_region_label, INPUT_REGION_HELP)
         ttk.Button(opt, text="🖱 框选输入框", command=self.select_input_region).grid(row=2, column=2, **pad)
         ttk.Button(opt, text="清除", command=self.reset_input_region).grid(row=2, column=3, **pad)
         ttk.Button(opt, text="👁 看输入框", command=self.probe_input).grid(row=2, column=4, **pad)
-        ttk.Button(opt, text="🔎 看候选面板", command=self.probe_candidates).grid(row=2, column=5, **pad)
 
         opt2 = ttk.LabelFrame(self.root, text="3. 参数")
         opt2.pack(fill="x", padx=6, pady=4)
         self.dry_var = tk.BooleanVar(value=self.cfg["dry_run"])
-        self.cand_var = tk.BooleanVar(value=self.cfg["candidate_mode"])
         self.verify_var = tk.BooleanVar(value=self.cfg["verify"])
         ttk.Checkbutton(opt2, text="模拟模式(只识别不按键)", variable=self.dry_var).grid(row=0, column=0, **pad)
-        ttk.Checkbutton(opt2, text="读候选框选中字", variable=self.cand_var).grid(row=0, column=1, **pad)
         ttk.Checkbutton(opt2, text="实时预览", variable=self.prev_var).grid(row=0, column=2, **pad)
         ttk.Checkbutton(opt2, text="打完验证", variable=self.verify_var).grid(row=0, column=3, **pad)
         ttk.Label(opt2, text="OCR倍率").grid(row=1, column=0, sticky="e", **pad)
@@ -250,20 +298,11 @@ class App:
         self.submit_var = tk.StringVar(value=self.cfg.get("submit", "auto"))
         ttk.Combobox(opt2, textvariable=self.submit_var, width=8, state="readonly",
                      values=["auto", "enter", "enter2"]).grid(row=2, column=1, sticky="w", **pad)
-        ttk.Label(opt2, text="翻页键").grid(row=2, column=2, sticky="e", **pad)
-        self.pagekey_var = tk.StringVar(value=self.cfg.get("page_key", "equal"))
-        ttk.Combobox(opt2, textvariable=self.pagekey_var, width=8, state="readonly",
-                     values=["equal", "minus", "pgdn", "pgup", "rbracket", "lbracket",
-                             "add", "subtract", "comma", "period", "right", "down"]
-                     ).grid(row=2, column=3, sticky="w", **pad)
         ttk.Label(opt2, text="按键方式").grid(row=3, column=0, sticky="e", **pad)
         self.sendmode_var = tk.StringVar(value=self.cfg.get("send_mode", "auto"))
         ttk.Combobox(opt2, textvariable=self.sendmode_var, width=8, state="readonly",
                      values=["auto", "vk", "scan", "post", "postchar"]
                      ).grid(row=3, column=1, sticky="w", **pad)
-        ttk.Button(opt2, text="⌨ 测试按键(打 aa)", command=self.test_typing).grid(row=3, column=2, **pad)
-        ttk.Button(opt2, text="🧪 测提交方式", command=self.test_submit).grid(row=3, column=3, sticky="w", **pad)
-        ttk.Button(opt2, text="📷 存截图", command=self.snap).grid(row=3, column=4, sticky="w", **pad)
 
         act = ttk.Frame(self.root)
         act.pack(fill="x", padx=6, pady=4)
@@ -292,16 +331,18 @@ class App:
 
     # ---------------- 窗口 ----------------
     def refresh_windows(self):
+        # 保留原版可见窗口枚举；不按 FF14、测试 EXE 或标题额外过滤。
         self.wins = win.list_windows()
         items = ["%s  |  %s" % (w[1], os.path.basename(w[2]) if w[2] else "?") for w in self.wins]
         self.win_box["values"] = items
+        self.win_box.set("")  # 防止刷新后旧索引落到资源管理器等其他窗口。
         cur = self.cfg.get("window_title", "")
-        if cur:
-            for i, w in enumerate(self.wins):
-                if cur.lower() in w[1].lower():
-                    self.win_box.current(i)
-                    break
-        elif items:
+        selected = next((i for i, w in enumerate(self.wins) if w[1].lower() == cur.lower()), None) if cur else None
+        if selected is None and cur:
+            selected = next((i for i, w in enumerate(self.wins) if cur.lower() in w[1].lower()), None)
+        if selected is not None:
+            self.win_box.current(selected)
+        elif not cur and items:
             self.win_box.current(0)
             self._on_window_pick()
         self._update_region_label()
@@ -324,22 +365,22 @@ class App:
             self.region_var.set("自动(窗口客户区): %s" % (cr,))
         else:
             self.region_var.set("自动(未找到窗口)")
-        cr2 = self.cfg.get("candidate_region")
-        self.cand_region_var.set("候选区: %s" % ((tuple(cr2),) if cr2 else "自动(窗口下半部分)",))
         ir = self.cfg.get("input_region")
         self.input_region_var.set("输入框区: %s" % ((tuple(ir),) if ir
                                                    else "未设置 ← 强烈建议框一下, 用来确认按键真进去了"))
 
     def _show_crop(self, res, tag):
         try:
-            from PIL import Image
             os.makedirs(os.path.join(BASE, ".cache"), exist_ok=True)
-            p = os.path.join(BASE, ".cache", "probe_%s.png" % tag)
-            self.ocr.save_last(p)
-            self.prev_img = Image.open(p).copy()
+            path = os.path.join(BASE, ".cache", "probe_%s.png" % tag)
+            saved = self.ocr.save_last(path)
+            if not saved.get("ok"):
+                self._log("预览保存失败: %s" % saved.get("err", "未知原因"), "warn")
+                return
+            self.prev_img = tk.PhotoImage(master=self.root, file=path)
             self._show_img()
-        except Exception:
-            pass
+        except (OSError, tk.TclError) as error:
+            self._log("预览加载失败: %s" % error, "warn")
 
     def probe_input(self):
         """把输入框那块截图 + OCR 结果直接展示出来"""
@@ -353,39 +394,13 @@ class App:
         if h:
             win.focus(h[0])
             time.sleep(0.15)
-        res = self.ocr.ocr_region(*rect, self.cfg.get("input_scale", 2.0))
+        scale = self.cfg.get("input_scale", 2.0)
+        res = self.ocr.ocr_region(*rect, scale)
+        if res.get("ok") and not res.get("lines") and scale != 1.0:
+            res = self.ocr.ocr_region(*rect, 1.0)
         lines = [ln.get("t", "") for ln in res.get("lines", [])]
         self._log("👁 输入框 OCR: %r" % lines, "info")
         self._show_crop(res, "input")
-
-    def probe_candidates(self):
-        """打一个字母, 然后看候选面板能不能被读到"""
-        self._on_window_pick()
-        self.ensure_ocr()
-        h = win.find_window(self.cfg.get("window_title", ""))
-        if not h:
-            messagebox.showwarning("提示", "请先选择游戏窗口")
-            return
-        hwnd = h[0]
-        win.focus(hwnd)
-        time.sleep(0.2)
-        kb = Keyboard(key_delay=0.02, send_mode=self.cfg.get("working_mode")
-                      or self.sendmode_var.get().replace("auto", "vk"))
-        kb.bind(hwnd)
-        eng = Engine(self.cfg, self.ocr, self.lex, kb,
-                     log=lambda m, t="info": self._log("  " + m, t))
-        eng.clear_input()
-        kb.type_text("a")
-        time.sleep(0.45)
-        rect = eng.candidate_rect()
-        cands, page, pages = eng.read_candidates()
-        self._log("🔎 候选扫描区域=%s  读到: %s  page=%s/%s" % (rect, cands, page, pages),
-                  "done" if cands else "miss")
-        res = {"ok": True}
-        self._show_crop(res, "cand")
-        kb.backspace(6)
-        time.sleep(0.1)
-        eng.clear_input()
 
     def snap(self):
         """把工具"看到"的画面存成图片, 用来确认截屏有没有抓到游戏"""
@@ -539,19 +554,6 @@ class App:
         self._update_region_label()
         self._log("输入框区域已清除", "info")
 
-    def select_cand_region(self):
-        RegionSelector(self.root, self._cand_region_done)
-        self.cfg["candidate_region"] = list(rect)
-        save_cfg(self.cfg)
-        self._update_region_label()
-        self._log("候选区设为 %s" % (rect,), "info")
-
-    def reset_cand_region(self):
-        self.cfg["candidate_region"] = None
-        save_cfg(self.cfg)
-        self._update_region_label()
-        self._log("候选区恢复自动", "info")
-
     def select_region(self):
         RegionSelector(self.root, self._region_done)
 
@@ -603,13 +605,16 @@ class App:
             messagebox.showwarning("提示", "没找到游戏窗口, 请先选择窗口")
             return
         t0 = time.time()
-        res = self.ocr.ocr_region(*region, float(self.scale_var.get()))
+        res = self.ocr.ocr_names(*region, float(self.scale_var.get()), lexicon=self.lex)
         dt = (time.time() - t0) * 1000
         if not res.get("ok"):
             self._log("OCR 失败: %s" % res.get("err"), "err")
             return
         self.last_result = res
-        self._log("试识别 区域=%s  耗时 %.0fms  行数=%d" % (region, dt, len(res.get("lines", []))), "info")
+        self._log("试识别 区域=%s  耗时 %.0fms  行数=%d  OCR=%d次  有效倍率=%.1f" %
+                  (region, dt, len(res.get("lines", [])), res.get("ocr_passes", 1),
+                   self.ocr._starting_name_scale(float(self.scale_var.get()))), "info")
+        match_start = time.perf_counter()
         for ln in res.get("lines", []):
             text = norm_text(ln.get("t", ""))
             if not text:
@@ -617,6 +622,7 @@ class App:
             m = self.lex.best(text)
             mark = "词库:%s(%s)" % (m.word, m.pinyin) if m else "词库外"
             self._log("  %-14r  %s" % (ln.get("t"), mark), "hit" if m else "warn")
+        self._log("词库匹配与日志耗时 %.1fms" % ((time.perf_counter()-match_start)*1000), "info")
         try:
             os.makedirs(os.path.join(BASE, ".cache"), exist_ok=True)
             self.ocr.save_last(os.path.join(BASE, ".cache", "preview.png"))
@@ -633,16 +639,21 @@ class App:
         self.start_engine()
 
     def start_engine(self):
+        if self.thread and self.thread.is_alive():
+            self._log("上一轮尚未停止，请稍后再启动", "warn")
+            return
+        if not 0 <= self.win_box.current() < len(self.wins):
+            messagebox.showwarning("目标窗口", "请刷新窗口并在下拉框中选择目标，避免沿用已关闭窗口的旧选择")
+            return
         self._on_window_pick()
         self.cfg.update({
             "dry_run": self.dry_var.get(),
-            "candidate_mode": self.cand_var.get(),
+            "candidate_mode": False,
             "preview": self.prev_var.get(),
             "verify": self.verify_var.get(),
             "ocr_scale": float(self.scale_var.get()),
             "cooldown": float(self.cool_var.get()),
             "submit": self.submit_var.get(),
-            "page_key": self.pagekey_var.get(),
             "send_mode": self.sendmode_var.get(),
         })
         save_cfg(self.cfg)
@@ -725,46 +736,49 @@ class App:
         if not os.path.exists(path):
             return
         try:
-            from PIL import Image, ImageTk
-            img = Image.open(path)
-            self.prev_img = img.copy()
-        except Exception:
+            # PhotoImage 原生读取 OCR 保存的 PNG，无需第三方图像库。
+            image = tk.PhotoImage(master=self.root, file=path)
+        except (OSError, tk.TclError):
+            # 宿主可能尚在写文件，保留上一张有效图，下一帧再读。
             return
+        self.prev_img = image
         self._show_img()
 
     def _draw_boxes(self, data):
         if not self.prev_var.get() or self.prev_img is None:
             return
         try:
-            from PIL import ImageDraw, ImageTk
-            img = self.prev_img.copy()
-            d = ImageDraw.Draw(img)
-            for t in data.get("targets", []):
-                d.rectangle([t.x, t.y, t.x + t.w, t.y + t.h], outline=(0, 255, 120), width=2)
-            self._show_img(img)
-        except Exception:
+            self._show_img()
+            factor = self._preview_factor
+            for target in data.get("targets", []):
+                self.cv.create_rectangle(target.x/factor, target.y/factor,
+                                         (target.x+target.w)/factor, (target.y+target.h)/factor,
+                                         outline="#00ff78", width=2)
+        except tk.TclError:
             pass
 
     def _show_img(self, img=None):
-        img = img or self.prev_img
-        if img is None:
+        image = self.prev_img if img is None else img
+        if image is None:
             return
         try:
-            from PIL import ImageTk
-            cw = max(80, self.cv.winfo_width())
-            ch = max(80, self.cv.winfo_height())
-            im = img.copy()
-            k = min(cw / im.width, ch / im.height, 1.0)
-            if k < 1.0:
-                im = im.resize((max(1, int(im.width * k)), max(1, int(im.height * k))))
-            self._tkimg = ImageTk.PhotoImage(im)
+            width, height = image.width(), image.height()
+            canvas_w = max(80, self.cv.winfo_width())
+            canvas_h = max(80, self.cv.winfo_height())
+            factor = max(1, (width+canvas_w-1)//canvas_w, (height+canvas_h-1)//canvas_h)
+            # 保留引用，避免 Tk 图片在 Python 回收后变空。
+            self._tkimg = image if factor == 1 else image.subsample(factor, factor)
+            self._preview_factor = factor
             self.cv.delete("all")
             self.cv.create_image(0, 0, anchor="nw", image=self._tkimg)
-            self.cv.create_text(4, 4, anchor="nw", text="%sx%s" % (img.width, img.height), fill="#00ff88")
-        except Exception:
+            self.cv.create_text(4, 4, anchor="nw", text="%sx%s" % (width, height), fill="#00ff88")
+        except tk.TclError:
             pass
 
     def _log(self, msg, tag="info"):
+        if threading.current_thread() is not threading.main_thread():
+            self.q.put(("log", msg, tag))
+            return
         ts = time.strftime("%H:%M:%S")
         self.log_txt.insert("end", "[%s] %s\n" % (ts, msg), tag)
         self.log_txt.see("end")

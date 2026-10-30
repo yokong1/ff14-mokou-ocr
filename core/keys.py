@@ -156,7 +156,7 @@ class Keyboard:
         inp.type = INPUT_KEYBOARD
         inp.ki.wVk = 0
         inp.ki.wScan = code & 0xFFFF
-        inp.ki.dwFlags = KEYEVENTF_UNICODE | (KEYEVENTF_KEYUP if down else 0)
+        inp.ki.dwFlags = KEYEVENTF_UNICODE | (0 if down else KEYEVENTF_KEYUP)
         user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
 
     def type_unicode(self, text):

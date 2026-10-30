@@ -76,7 +76,8 @@ class Lexicon:
 
     # ---------- 载入 ----------
     def _load(self):
-        raw = open(self.path, "rb").read()
+        with open(self.path, "rb") as stream:
+            raw = stream.read()
         text = None
         for enc in ("utf-8-sig", "gbk"):
             try:
@@ -130,6 +131,8 @@ class Lexicon:
         head = []
         if text in self.words:
             head = [Match(text, self.words[text], 1.0, True)]
+        if head and n == 1:
+            return head  # 已精确命中时不再遍历全部词库，匹配结果与原版一致。
         out = []
         for w, py in self.words.items():
             if abs(len(w) - len(text)) > 2:

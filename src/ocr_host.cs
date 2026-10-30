@@ -48,35 +48,68 @@ static class OcrHost
         {
             line = line.Trim();
             if (line.Length == 0) continue;
-            string[] p = line.Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            string[] p = line.IndexOf('\t') >= 0 ? line.Split('\t') : line.Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
             string cmd = p[0].ToUpperInvariant();
             if (cmd == "QUIT") break;
             try
             {
                 if (cmd == "INFO") { WriteJson("{\"ok\":true,\"screen\":[" + GetSystemMetrics(0) + "," + GetSystemMetrics(1) + "]}"); }
-                else if (cmd == "OCR")
+                else if (cmd == "OCR" || cmd == "OCRP" || cmd == "OCRC" || cmd == "OCRW")
                 {
                     int x = int.Parse(p[1]), y = int.Parse(p[2]), w = int.Parse(p[3]), h = int.Parse(p[4]);
                     double scale = p.Length > 5 ? double.Parse(p[5], CultureInfo.InvariantCulture) : 2.0;
                     var sw = System.Diagnostics.Stopwatch.StartNew();
                     Bitmap bmp = Grab(x, y, w, h);
+                    if (lastBitmap != null) lastBitmap.Dispose();
                     lastBitmap = bmp;
                     long capMs = sw.ElapsedMilliseconds;
-                    var res = Recognize(bmp, scale);
+                    var res = RecognizeProfile(bmp,scale,cmd);
                     sw.Stop();
                     res = res.Insert(1, "\"cap\":" + capMs + ",\"ms\":" + sw.ElapsedMilliseconds + ",");
                     WriteJson(res);
                 }
-                else if (cmd == "FILE")
+                else if (cmd == "FILE" || cmd == "FILEP" || cmd == "FILEC" || cmd == "FILEW")
                 {
                     double scale = p.Length > 2 ? double.Parse(p[2], CultureInfo.InvariantCulture) : 2.0;
                     var sw = System.Diagnostics.Stopwatch.StartNew();
                     Bitmap bmp = new Bitmap(p[1]);
+                    if (lastBitmap != null) lastBitmap.Dispose();
                     lastBitmap = bmp;
-                    var res = Recognize(bmp, scale);
+                    var res = RecognizeProfile(bmp,scale,cmd);
                     sw.Stop();
                     res = res.Insert(1, "\"ms\":" + sw.ElapsedMilliseconds + ",");
                     WriteJson(res);
+                }
+                else if (cmd == "RETRY")
+                {
+                    if (lastBitmap == null) { WriteJson(Err("no image")); }
+                    else { WriteJson(RecognizePadded(lastBitmap,double.Parse(p[1],CultureInfo.InvariantCulture))); }
+                }
+                else if (cmd == "CONTRAST")
+                {
+                    if (lastBitmap == null) { WriteJson(Err("no image")); }
+                    else
+                    {
+                        const int padding = 16;
+                        using (var contrast = ContrastText(lastBitmap, padding))
+                        {
+                            var res = Recognize(contrast, double.Parse(p[1], CultureInfo.InvariantCulture));
+                            WriteJson(res.Insert(1, "\"padding\":"+padding+","));
+                        }
+                    }
+                }
+                else if (cmd == "COLOR")
+                {
+                    if (lastBitmap == null) { WriteJson(Err("no image")); }
+                    else
+                    {
+                        const int padding = 16;
+                        using (var mask = WhiteTextMask(lastBitmap, padding))
+                        {
+                            var res = Recognize(mask, 1.0);
+                            WriteJson(res.Insert(1, "\"padding\":" + padding + ","));
+                        }
+                    }
                 }
                 else if (cmd == "SAVE")
                 {
@@ -103,6 +136,122 @@ static class OcrHost
         return bmp;
     }
 
+    static Bitmap WhiteTextMask(Bitmap source, int padding)
+    {
+        // 浅色字转为黑字白底，消除黄色等底色干扰；原截图仍保留供预览。
+        var mask = new Bitmap(source.Width + padding*2, source.Height + padding*2, PixelFormat.Format32bppArgb);
+        using (var input = source.Clone(new Rectangle(0, 0, source.Width, source.Height), PixelFormat.Format32bppArgb))
+        {
+            var src = input.LockBits(new Rectangle(0, 0, input.Width, input.Height), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+            try
+            {
+                var dst = mask.LockBits(new Rectangle(0, 0, mask.Width, mask.Height), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
+                try
+                {
+                    byte[] pixels = new byte[Math.Abs(src.Stride)*input.Height];
+                    byte[] output = new byte[Math.Abs(dst.Stride)*mask.Height];
+                    Marshal.Copy(src.Scan0, pixels, 0, pixels.Length);
+                    for (int i=0; i<output.Length; i++) output[i]=255;
+                    for (int y=0; y<input.Height; y++)
+                    {
+                        int from = y*Math.Abs(src.Stride), to = (y+padding)*Math.Abs(dst.Stride)+padding*4;
+                        for (int x=0; x<input.Width; x++, from+=4, to+=4)
+                        {
+                            byte value = pixels[from]>200 && pixels[from+1]>200 && pixels[from+2]>200 ? (byte)0 : (byte)255;
+                            output[to]=output[to+1]=output[to+2]=value;
+                        }
+                    }
+                    Marshal.Copy(output, 0, dst.Scan0, output.Length);
+                }
+                finally { mask.UnlockBits(dst); }
+            }
+            finally { input.UnlockBits(src); }
+        }
+        return mask;
+    }
+
+    static string RecognizeProfile(Bitmap source,double scale,string command)
+    {
+        if(command=="OCRP" || command=="FILEP")return RecognizePadded(source,scale);
+        bool contrast=command=="OCRC" || command=="FILEC";
+        bool white=command=="OCRW" || command=="FILEW";
+        if(!contrast && !white)return Recognize(source,scale);
+        const int padding=16;
+        using(var prepared=contrast?ContrastText(source,padding):WhiteTextMask(source,padding))
+            return Recognize(prepared,scale).Insert(1,"\"padding\":"+padding+",\"source_img\":["+source.Width+","+source.Height+"],");
+    }
+
+    static string RecognizePadded(Bitmap source,double scale)
+    {
+        const int padding=12;
+        using(var padded=new Bitmap(source.Width+padding*2,source.Height+padding*2,PixelFormat.Format32bppArgb))
+        {
+            using(var g=Graphics.FromImage(padded)){g.Clear(Color.Black);g.DrawImageUnscaled(source,padding,padding);}
+            return Recognize(padded,scale).Insert(1,"\"padding\":"+padding+",\"source_img\":["+source.Width+","+source.Height+"],");
+        }
+    }
+
+    static Bitmap ContrastText(Bitmap source, int padding)
+    {
+        // 取绿色通道抑制蓝色底和辉光，按当前图像范围归一化，灰字也不会被固定白字阈值抹掉。
+        var image = new Bitmap(source.Width+padding*2, source.Height+padding*2, PixelFormat.Format32bppArgb);
+        using (var input = source.Clone(new Rectangle(0,0,source.Width,source.Height), PixelFormat.Format32bppArgb))
+        {
+            var src = input.LockBits(new Rectangle(0,0,input.Width,input.Height), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+            try
+            {
+                byte[] pixels = new byte[Math.Abs(src.Stride)*input.Height];
+                Marshal.Copy(src.Scan0,pixels,0,pixels.Length);
+                int[] histogram = new int[256];
+                for(int y=0;y<input.Height;y++) for(int x=0;x<input.Width;x++) histogram[pixels[y*Math.Abs(src.Stride)+x*4+1]]++;
+                int total=input.Width*input.Height, low=0, high=255, sum=0;
+                for(int i=0;i<256;i++){sum+=histogram[i];if(sum>=Math.Max(1,total/100)){low=i;break;}}
+                sum=0;
+                for(int i=255;i>=0;i--){sum+=histogram[i];if(sum>=Math.Max(1,total/100)){high=i;break;}}
+                int span=Math.Max(1,high-low);
+                var dst=image.LockBits(new Rectangle(0,0,image.Width,image.Height),ImageLockMode.WriteOnly,PixelFormat.Format32bppArgb);
+                try
+                {
+                    byte[] output=new byte[Math.Abs(dst.Stride)*image.Height];
+                    for(int i=0;i<output.Length;i++)output[i]=255;
+                    for(int y=0;y<input.Height;y++)for(int x=0;x<input.Width;x++)
+                    {
+                        int from=y*Math.Abs(src.Stride)+x*4, to=(y+padding)*Math.Abs(dst.Stride)+(x+padding)*4;
+                        int value=255-Math.Min(255,Math.Max(0,(pixels[from+1]-low)*255/span));
+                        output[to]=output[to+1]=output[to+2]=(byte)value;
+                    }
+                    Marshal.Copy(output,0,dst.Scan0,output.Length);
+                }
+                finally{image.UnlockBits(dst);}
+            }
+            finally{input.UnlockBits(src);}
+        }
+        return image;
+    }
+
+    static SoftwareBitmap NativeSoftwareBitmap(Bitmap bitmap)
+    {
+        // 原始倍率直接复制像素，省掉 BMP 编码、内存流和再次解码；缩放仍走原解码器。
+        using (var copy = bitmap.Clone(new Rectangle(0,0,bitmap.Width,bitmap.Height),PixelFormat.Format32bppArgb))
+        {
+            var bits=copy.LockBits(new Rectangle(0,0,copy.Width,copy.Height),ImageLockMode.ReadOnly,PixelFormat.Format32bppArgb);
+            try
+            {
+                int rowBytes=copy.Width*4;
+                byte[] pixels=new byte[rowBytes*copy.Height];
+                for(int y=0;y<copy.Height;y++)
+                    Marshal.Copy(IntPtr.Add(bits.Scan0,y*bits.Stride),pixels,y*rowBytes,rowBytes);
+                using(var writer=new DataWriter())
+                {
+                    writer.WriteBytes(pixels);
+                    return SoftwareBitmap.CreateCopyFromBuffer(writer.DetachBuffer(),BitmapPixelFormat.Bgra8,
+                        copy.Width,copy.Height,BitmapAlphaMode.Ignore);
+                }
+            }
+            finally{copy.UnlockBits(bits);}
+        }
+    }
+
     static string Recognize(Bitmap bmp, double scale)
     {
         int nw = Math.Max(1, (int)Math.Round(bmp.Width * scale));
@@ -112,14 +261,22 @@ static class OcrHost
         if (nh > cap) { double k = (double)cap / nh; nh = cap; nw = Math.Max(1, (int)(nw * k)); }
         double eff = (double)nw / bmp.Width;
 
+        var prepareClock = System.Diagnostics.Stopwatch.StartNew();
         SoftwareBitmap sb;
+        if (nw == bmp.Width && nh == bmp.Height)
+        {
+            sb = NativeSoftwareBitmap(bmp);
+        }
+        else
+        {
         using (var ms = new MemoryStream())
         {
             bmp.Save(ms, ImageFormat.Bmp);
             ms.Position = 0;
             using (var ras = new MemoryStream(ms.ToArray()))
             {
-                var stream = ToWinRT(ras.ToArray());
+                using (var stream = ToWinRT(ras.ToArray()))
+                {
                 var decoderTask = BitmapDecoder.CreateAsync(stream);
                 var decoder = Await(decoderTask);
                 var transform = new BitmapTransform();
@@ -130,13 +287,20 @@ static class OcrHost
                                                           transform, ExifOrientationMode.IgnoreExifOrientation,
                                                           ColorManagementMode.DoNotColorManage);
                 sb = Await(task);
+                }
             }
         }
-        var ocr = Await(engine.RecognizeAsync(sb));
+        }
+        prepareClock.Stop();
+        var ocrClock = System.Diagnostics.Stopwatch.StartNew();
+        Windows.Media.Ocr.OcrResult ocr;
+        using (sb) { ocr = Await(engine.RecognizeAsync(sb)); }
+        ocrClock.Stop();
 
         var sbld = new StringBuilder();
         sbld.Append("{\"ok\":true,\"img\":[" + bmp.Width + "," + bmp.Height + "],\"scale\":" +
-                    eff.ToString("0.###", CultureInfo.InvariantCulture) + ",\"lines\":[");
+                    eff.ToString("0.###", CultureInfo.InvariantCulture) + ",\"prep_ms\":" + prepareClock.Elapsed.TotalMilliseconds.ToString("0.###", CultureInfo.InvariantCulture) +
+                    ",\"ocr_ms\":" + ocrClock.Elapsed.TotalMilliseconds.ToString("0.###", CultureInfo.InvariantCulture) + ",\"lines\":[");
         bool first = true;
         foreach (var ln in ocr.Lines)
         {
@@ -208,14 +372,24 @@ static class OcrHost
     static IRandomAccessStream ToWinRT(byte[] data)
     {
         var ras = new InMemoryRandomAccessStream();
-        var writer = new DataWriter(ras.GetOutputStreamAt(0));
-        writer.WriteBytes(data);
-        Await(writer.StoreAsync());
-        Await(ras.FlushAsync());
+        using (var writer = new DataWriter(ras))
+        {
+            writer.WriteBytes(data);
+            Await(writer.StoreAsync());
+            writer.DetachStream();
+        }
         ras.Seek(0);
         return ras;
     }
 
-    static T Await<T>(Windows.Foundation.IAsyncOperation<T> op) { return op.AsTask().GetAwaiter().GetResult(); }
-    static void Await(Windows.Foundation.IAsyncAction op) { op.AsTask().GetAwaiter().GetResult(); }
+    static T Await<T>(Windows.Foundation.IAsyncOperation<T> op)
+    {
+        while (op.Status == Windows.Foundation.AsyncStatus.Started) System.Threading.Thread.Sleep(2);
+        return op.GetResults();
+    }
+    static void Await(Windows.Foundation.IAsyncAction op)
+    {
+        while (op.Status == Windows.Foundation.AsyncStatus.Started) System.Threading.Thread.Sleep(2);
+        op.GetResults();
+    }
 }

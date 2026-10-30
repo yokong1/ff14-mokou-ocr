@@ -57,6 +57,7 @@ user32.keybd_event.argtypes = [wintypes.BYTE, wintypes.BYTE, wintypes.DWORD, cty
 
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+kernel32.OpenProcess.restype = wintypes.HANDLE
 kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
 kernel32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD,
                                                wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
@@ -81,6 +82,16 @@ def _process_name(hwnd):
         kernel32.CloseHandle(h)
 
 
+class WINDOWPLACEMENT(ctypes.Structure):
+    _fields_ = [("length", wintypes.UINT), ("flags", wintypes.UINT), ("showCmd", wintypes.UINT),
+                ("ptMinPosition", wintypes.POINT), ("ptMaxPosition", wintypes.POINT),
+                ("rcNormalPosition", wintypes.RECT)]
+
+
+user32.GetWindowPlacement.argtypes = [wintypes.HWND, ctypes.POINTER(WINDOWPLACEMENT)]
+user32.GetWindowPlacement.restype = wintypes.BOOL
+
+
 def list_windows(min_w=320, min_h=240, with_proc=True):
     """返回可见的顶层窗口 [(hwnd, title, proc_path, (x,y,w,h)), ...]"""
     result = []
@@ -103,7 +114,15 @@ def list_windows(min_w=320, min_h=240, with_proc=True):
         if not user32.GetWindowRect(hwnd, ctypes.byref(r)):
             return True
         w, h = r.right - r.left, r.bottom - r.top
-        if w < min_w or h < min_h:
+        filter_w, filter_h = w, h
+        if user32.IsIconic(hwnd):
+            # 最小化时 GetWindowRect 可能只剩 129×28；用恢复尺寸过滤，不改屏幕坐标。
+            placement = WINDOWPLACEMENT()
+            placement.length = ctypes.sizeof(WINDOWPLACEMENT)
+            if user32.GetWindowPlacement(hwnd, ctypes.byref(placement)):
+                normal = placement.rcNormalPosition
+                filter_w, filter_h = normal.right - normal.left, normal.bottom - normal.top
+        if filter_w < min_w or filter_h < min_h:
             return True
         result.append((hwnd, title, _process_name(hwnd) if with_proc else "", (r.left, r.top, w, h)))
         return True

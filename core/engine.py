@@ -63,6 +63,8 @@ class Engine:
         self._hwnd_ttl = 0.0
         self._tight = None
         self._tight_ttl = 0.0
+        self._full_scan_ts = 0.0
+        self._unicode_read_cache = None
         self._unknown_logged = {}
         self._input_fail = 0
         self._afk_ts = _now()
@@ -116,17 +118,22 @@ class Engine:
         self._tight_ttl = _now() + self.cfg.get("narrow_seconds", 1.5)
 
     def scan_rect(self):
-        if self._tight and _now() < self._tight_ttl:
+        now = _now()
+        if (self._tight and now < self._tight_ttl
+                and now-self._full_scan_ts < self.cfg.get("full_scan_interval", .6)):
             return self._tight
-        self._tight = None
+        self._full_scan_ts = now
         return self.region()
 
     # ---------------- 解析 ----------------
     def parse(self, result):
         targets = []
         black = [b for b in self.cfg.get("blacklist", []) if b]
-        lo, hi = self.cfg.get("min_len", 2), self.cfg.get("max_len", 12)
+        lo = self.cfg.get("min_len", 2)
+        hi = max(self.cfg.get("max_len", 12), max(map(len, self.lex.words), default=0))
         skip_rects = self.skip_rects()
+        origin = result.get("region")
+        ox, oy = origin[:2] if origin else (0, 0)
         for ln in result.get("lines", []):
             raw = ln.get("t", "")
             text = norm_text(raw)
@@ -143,7 +150,8 @@ class Engine:
                 continue
             # 落在输入框 / 候选框区域里的, 不是怪名
             box = (ln["x"], ln["y"], ln["w"], ln["h"])
-            if any(_overlap(box, r) > 0.5 for r in skip_rects):
+            screen_box = (ox+box[0], oy+box[1], box[2], box[3])
+            if any(_overlap(screen_box, r) > 0.5 for r in skip_rects):
                 continue
             m = self.lex.best(text)
             if not m:
@@ -238,7 +246,10 @@ class Engine:
         rect = self.input_rect()
         if not rect:
             return None
-        res = self.ocr.ocr_region(*rect, self.cfg.get("input_scale", 2.0))
+        scale = self.cfg.get("input_scale", 2.0)
+        res = self.ocr.ocr_region(*rect, scale)
+        if res.get("ok") and not res.get("lines") and scale != 1.0:
+            res = self.ocr.ocr_region(*rect, 1.0)
         if not res.get("ok"):
             return None
         return "".join(norm_loose(ln.get("t", "")) for ln in res.get("lines", []))
@@ -510,6 +521,7 @@ class Engine:
     def type_unicode_probe(self, word, hwnd, post=False, ime_char=False):
         """直接把汉字塞进输入框(绕开输入法)"""
         self.kb.bind(hwnd)
+        self._unicode_read_cache = None
         if not self.input_rect():
             if post:
                 self.kb.post_unicode(word, ime_char=ime_char)
@@ -525,6 +537,7 @@ class Engine:
                 self.kb.type_unicode(word)
             time.sleep(self.cfg.get("after_type_wait", 0.22))
             got = self.read_input_retry()
+            self._unicode_read_cache = (word, got, time.monotonic())
             if got and difflib.SequenceMatcher(None, norm_text(got), norm_text(word)).ratio() >= 0.6:
                 style = "unicode_post" if post else "unicode"
                 if self.cfg.get("working_submit") != style:
@@ -621,7 +634,13 @@ class Engine:
 
         # 输入框内容记录(游戏若只认拼音, 这一步只是提示)
         if self.input_rect():
-            boxed = self.read_input_retry() or ""
+            recent = self._unicode_read_cache
+            self._unicode_read_cache = None
+            if (style in ("unicode", "unicode_post") and recent and recent[0] == typed_text
+                    and time.monotonic()-recent[2] < .25):
+                boxed = recent[1] or ""  # 刚读过同一输入，诊断日志不再重复做 OCR。
+            else:
+                boxed = self.read_input_retry() or ""
             if boxed:
                 r = difflib.SequenceMatcher(None, boxed, word).ratio()
                 self.log("  框内=%r 与目标相似度 %.2f (提交方式=%s)" % (boxed, r, style), "info")
@@ -708,7 +727,7 @@ class Engine:
                 time.sleep(0.1)
                 continue
             n += 1
-            if cfg.get("anti_afk", True):
+            if cfg.get("anti_afk", True) and not cfg.get("dry_run"):
                 _sec = cfg.get("anti_afk_seconds", 10)
                 _cnt = cfg.get("anti_afk_every_sends", 7)
                 if (_now() - self._afk_ts > _sec) or (self.stats["typed"] - self._afk_sends >= _cnt):
@@ -723,7 +742,7 @@ class Engine:
                 if h and win.is_minimized(h):
                     time.sleep(0.3)
                     continue
-                res = self.ocr.ocr_region(*region, scale)
+                res = self.ocr.ocr_names(*region, scale, lexicon=self.lex)
                 self.last_frame = res
                 if cfg.get("preview") and n % preview_every == 0:
                     try:
@@ -743,7 +762,7 @@ class Engine:
                     y0 = min(t.y for t in targets)
                     x1 = max(t.x + t.w for t in targets)
                     y1 = max(t.y + t.h for t in targets)
-                    self.narrow((x0, y0, x1 - x0, y1 - y0))
+                    self.narrow((region[0]+x0, region[1]+y0, x1 - x0, y1 - y0))
                 else:
                     self._tight = None
                 if not targets:

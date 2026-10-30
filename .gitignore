@@ -7,3 +7,7 @@ config.json
 data/
 shot_*.png
 *.tmp
+launch-admin.log
+
+# Local intermediate build; the active host is included in releases.
+bin/ocr_host_0_9_1.exe
