@@ -19,7 +19,7 @@ FF14「魔光键影」活动的屏幕文字识别与输入辅助工具。当前�
 
 ## 下载与启动
 
-1. 从 [Releases](https://github.com/yokong1/ff14-mokou-ocr/releases) 下载版本压缩包，或在仓库选择 **Code → Download ZIP**。
+1. 从 **[Gitee 发行版（国内下载）](https://gitee.com/the-mighty-monkey-king/ff14-mokou-ocr/releases)** 或 [GitHub Releases](https://github.com/yokong1/ff14-mokou-ocr/releases) 下载版本压缩包，也可以在仓库页面选择 **下载 ZIP / Download ZIP**。
 2. **完整解压整个文件夹**，保留 `app.py`、`core`、`bin`、`launcher.ps1`、词库和两个启动批处理文件。不要只下载单个 Python 文件，也不要直接在压缩包内运行。
 3. 安装完整的 Python 3.x（64 位，包含 Tcl/Tk）。
 4. 将游戏设为窗口化或无边框窗口化，进入需要识别的活动画面。
